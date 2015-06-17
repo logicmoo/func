@@ -11,13 +11,13 @@
 
 % true if the module whose terms are being read has specifically
 % imported library(func).
-wants_func :-
+wants_func(Module) :-
     prolog_load_context(module, Module),
     Module \== func,  % we don't want func sugar ourselves
     predicate_property(Module:of(_,_),imported_from(func)).
 
 
-%%  compile_function(+Term, -In, -Out, -Goal) is semidet.
+%%  compile_function(+Module, +Term, -In, -Out, -Goal) is semidet.
 %
 %   True if Term represents a function from In to Out
 %   implemented by calling Goal.  This multifile hook is
@@ -30,8 +30,8 @@ wants_func :-
 %   For example, to treat library(assoc) terms as functions which
 %   map a key to a value, one might define:
 %
-%       :- multifile compile_function/4.
-%       compile_function(Assoc, Key, Value, Goal) :-
+%       :- multifile compile_function/5.
+%       compile_function(Module, Assoc, Key, Value, Goal) :-
 %           is_assoc(Assoc),
 %           Goal = get_assoc(Key, Assoc, Value).
 %
@@ -39,24 +39,24 @@ wants_func :-
 %
 %       list_to_assoc([a-1, b-2, c-3], Assoc),
 %       Two = Assoc $ b,
-:- multifile compile_function/4.
-compile_function(Var, _, _, _) :-
+:- multifile compile_function/5.
+compile_function(_, Var, _, _, _) :-
     % variables storing functions must be evaluated at run time
     % and can't be compiled, a priori, into a goal
     var(Var),
     !,
     fail.
-compile_function(Expr, In, Out, Out is Expr) :-
+compile_function(_, Expr, In, Out, Out is Expr) :-
     % arithmetic expression of one variable are simply evaluated
     \+ string(Expr),  % evaluable/1 throws exception with strings
     arithmetic:evaluable(Expr),
     term_variables(Expr, [In]).
-compile_function(F, In, Out, func:Goal) :-
+compile_function(M, F, In, Out, M:Goal) :-
     % composed functions
     function_composition_term(F),
-    user:function_expansion(F, func:Functor, true),
+    user:function_expansion(F, M:Functor, true),
     Goal =.. [Functor,In,Out].
-compile_function(F, In, Out, Goal) :-
+compile_function(_, F, In, Out, Goal) :-
     % string interpolation via format templates
     format_template(F),
     ( atom(F) ->
@@ -67,8 +67,7 @@ compile_function(F, In, Out, Goal) :-
         Goal = format(codes(Out), F, In)
     ; fail  % to be explicit
     ).
-compile_function(Dict, In, Out, Goal) :-
-    current_predicate(system:is_dict/1),
+compile_function(_, Dict, In, Out, Goal) :-
     is_dict(Dict),
     Goal = get_dict(In, Dict, Out).
 
@@ -91,15 +90,15 @@ $(_,_) :-
           context(_, '$/2 must be subject to goal expansion'))).
 
 user:function_expansion($(F,X), Y, Goal) :-
-    wants_func,
-    ( func:compile_function(F, X, Y, Goal) ->
+    wants_func(M),
+    ( func:compile_function(M,F, X, Y, Goal) ->
         true
     ; var(F) -> Goal =      % defer until run time
-        ( func:compile_function(F, X, Y, P) ->
-            call(P)
+        ( func:compile_function(M,F, X, Y, P) ->
+            call(M:P)
         ; call(F, X, Y)
         )
-    ; Goal = call(F, X, Y)
+    ; Goal = M:call(F, X, Y)
     ).
 
 
@@ -148,7 +147,7 @@ functions_to_compose(Term, Funcs) :-
 % to a DCG expansion, but much simpler.
 thread_state([], [], Out, Out).
 thread_state([F|Funcs], [Goal|Goals], In, Out) :-
-    ( compile_function(F, In, Tmp, Goal) ->
+    ( compile_function(_, F, In, Tmp, Goal) ->
         true
     ; var(F) ->
         instantiation_error(F)
@@ -159,12 +158,12 @@ thread_state([F|Funcs], [Goal|Goals], In, Out) :-
     thread_state(Funcs, Goals, Tmp, Out).
 
 user:function_expansion(Term, func:Functor, true) :-
-    wants_func,
+    wants_func(M),
     functions_to_compose(Term, Funcs),
     debug(func, 'building composed function for: ~w', [Term]),
     variant_sha1(Funcs, Sha),
     format(atom(Functor), 'composed_function_~w', [Sha]),
-    debug(func, '  name: ~s', [Functor]),
+    debug(func, '  name: ~q', [M:Functor/2]),
     ( func:current_predicate(Functor/2) ->
         debug(func, '  composed predicate already exists', [])
     ; true ->
@@ -172,14 +171,15 @@ user:function_expansion(Term, func:Functor, true) :-
         thread_state(RevFuncs, Threaded, In, Out),
         xfy_list(',', Body, Threaded),
         Head =.. [Functor, In, Out],
-        func:assert(Head :- Body),
-        func:compile_predicates([Functor/2])
+        M:assert(Head :- Body),
+        M:compile_predicates([Functor/2]),
+        export(M:Functor/2)
     ).
 
 
 % support foo(x,~,y) evaluation
-user:function_expansion(Term, Output, Goal) :-
-    wants_func,
+user:function_expansion(Term, Output, M:Goal) :- 
+    wants_func(M),
     compound(Term),
 
     % has a single ~ argument
